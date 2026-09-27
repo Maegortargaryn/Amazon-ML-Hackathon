@@ -11,8 +11,49 @@ The biggest hurdle in this hackathon was handling generic chain names and cross-
 2. **The Test Set Domain Shift:** The training set only contained US and India data. The test set introduced a third country: France.
 3. **ML Overconfidence:** We initially trained a LightGBM pairwise classifier using TF-IDF weighted string similarities. It achieved 0.98 precision on the validation set. However, on the test set, it falsely merged distinct French businesses because they shared common French words (like "Societe" or "Ecole"). The US/India-trained IDF vectorizer treated these words as extremely rare and highly discriminative, causing the ML model to output >99% confidence for completely wrong matches.
 
+## System Architecture
+
+The overarching pipeline streams massive target files in chunks, relying on a lightweight multi-key blocking dictionary to fetch candidates before executing the resolution heuristics.
+
+```mermaid
+graph TD
+    A[Load S1 References] --> B[Tokenization & Normalization]
+    B --> C[Generate Multi-Key Blocks]
+    
+    subgraph Target Streaming
+    D[Stream Target TSV in 200k Chunks] --> E[Extract Target Block Keys]
+    E --> F[Look up S1 Candidates via Blocks]
+    F --> G[Run Ultra-Strict Heuristic]
+    end
+    
+    C --> F
+    G --> H[Output matching_results.tsv]
+    G --> I[Output candidate_pairs.tsv]
+```
+
 ## Our Solution: The Ultra-Strict Pure Heuristic
 To guarantee a leaderboard score of `>0.99` Macro $F_{0.5}$, we abandoned the fragile LightGBM model and engineered an **Ultra-Strict Pure Python Heuristic**. This approach mathematically vetoes false positives while capturing high-confidence typos.
+
+### Decision Flow Logic
+
+```mermaid
+flowchart TD
+    Start([Candidate Pair]) --> CheckBldg{Building / Postal Conflict?}
+    
+    CheckBldg -- Yes --> Drop((Drop Candidate))
+    CheckBldg -- No --> CheckName{Name Match Level}
+    
+    CheckName -- Exact Match --> Corroboration1{Address Corroboration?}
+    CheckName -- High Typo / Domain Match --> Corroboration2{Strict Address Corroboration?}
+    CheckName -- Low Similarity --> Drop
+    
+    Corroboration1 -- Address Dice >= 0.25 + Bldg --> Match([Confirmed Match])
+    Corroboration1 -- Address Dice >= 0.70 --> Match
+    Corroboration1 -- Insufficient --> Drop
+    
+    Corroboration2 -- Address Dice >= 0.80 --> Match
+    Corroboration2 -- Insufficient --> Drop
+```
 
 ### Key Features of the Pipeline
 1. **Absolute Building / Postal Veto:** If two records both contain a building number or postal code and they do *not* exactly match, the pair is immediately rejected. This prevents generic branch collisions.
